@@ -3,20 +3,22 @@ package main
 import (
 	"log"
 	"net/http"
-
-	"github.com/luisalejandro/Proyecto_1_Distribuidos/internal/gateway"
+	"Proyecto_1_Distribuidos/internal/gateway"
 )
 
 func main() {
-	hub := gateway.NewHub() // manager de rooms y conexiones
+	hub := gateway.NewHub()
+
+	// Iniciamos el loop del Hub en background
+	go hub.Run()
 
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		gateway.ServeWs(hub, w, r)
 	})
 
-	log.Println("🚀 Chat Gateway corriendo en :8080")
-	log.Println("Conéctate con: ws://localhost:8080/ws?userId=123&token=abc")
+	log.Println("🚀 Chat Gateway v2.0 corriendo en http://localhost:8080")
+	log.Println("Ejemplo: ws://localhost:8080/ws?userId=luis&groupId=grupo1&token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
-		log.Fatal("ListenAndServe: ", err)
+		log.Fatal(err)
 	}
 }

@@ -1,19 +1,16 @@
 package gateway
 
-import (
-	"sync"
-
-	"github.com/google/uuid"
-)
+import "sync"
 
 type Client struct {
-	ID   string
-	Hub  *Hub
-	Send chan []byte
+	ID     string
+	GroupID string
+	Hub    *Hub
+	Send   chan []byte
 }
 
 type Hub struct {
-	Rooms      map[string]map[*Client]bool // roomID -> clients
+	Rooms      map[string]map[*Client]bool // groupID -> clients
 	Register   chan *Client
 	Unregister chan *Client
 	Broadcast  chan BroadcastMessage
@@ -21,7 +18,7 @@ type Hub struct {
 }
 
 type BroadcastMessage struct {
-	RoomID  string
+	GroupID string
 	Message []byte
 }
 
@@ -30,7 +27,7 @@ func NewHub() *Hub {
 		Rooms:      make(map[string]map[*Client]bool),
 		Register:   make(chan *Client),
 		Unregister: make(chan *Client),
-		Broadcast:  make(chan BroadcastMessage),
+		Broadcast:  make(chan BroadcastMessage, 100),
 	}
 }
 
@@ -39,26 +36,26 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.Register:
 			h.mu.Lock()
-			if _, ok := h.Rooms[client.ID]; !ok { // por simplicidad usamos userId como room temporal
-				h.Rooms[client.ID] = make(map[*Client]bool)
+			if _, ok := h.Rooms[client.GroupID]; !ok {
+				h.Rooms[client.GroupID] = make(map[*Client]bool)
 			}
-			h.Rooms[client.ID][client] = true
+			h.Rooms[client.GroupID][client] = true
 			h.mu.Unlock()
 
 		case client := <-h.Unregister:
 			h.mu.Lock()
-			if clients, ok := h.Rooms[client.ID]; ok {
+			if clients, ok := h.Rooms[client.GroupID]; ok {
 				delete(clients, client)
 				close(client.Send)
 				if len(clients) == 0 {
-					delete(h.Rooms, client.ID)
+					delete(h.Rooms, client.GroupID)
 				}
 			}
 			h.mu.Unlock()
 
 		case msg := <-h.Broadcast:
 			h.mu.RLock()
-			if clients, ok := h.Rooms[msg.RoomID]; ok {
+			if clients, ok := h.Rooms[msg.GroupID]; ok {
 				for client := range clients {
 					select {
 					case client.Send <- msg.Message:
