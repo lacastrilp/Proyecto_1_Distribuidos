@@ -1,0 +1,8 @@
+services:
+  proyecto1:
+    image: proyecto1
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    ports:
+      - 8080:8080
