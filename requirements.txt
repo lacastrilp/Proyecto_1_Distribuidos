@@ -1,0 +1,8 @@
+grpcio
+grpcio-tools
+protobuf
+requests
+pika
+python-dotenv
+Flask
+PyJWT
