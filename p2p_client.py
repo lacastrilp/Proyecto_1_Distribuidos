@@ -10,27 +10,22 @@ import requests
 import pika
 import threading
 import os
+import sys
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
 SIGNALING_ADDR = 'localhost:50051'
 RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
 RABBITMQ_PASS = os.getenv('RABBITMQ_PASS', 'guest')
 
-# ==================== RABBITMQ (para chat en vivo) ====================
 def get_rabbit_connection_and_channel():
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-    parameters = pika.ConnectionParameters(
-        host='localhost',
-        credentials=credentials,
-        heartbeat=600,
-        blocked_connection_timeout=300
-    )
+    parameters = pika.ConnectionParameters(host='localhost', credentials=credentials, heartbeat=600, blocked_connection_timeout=300)
     connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
     return connection, channel
 
-# ==================== SERVIDOR P2P LOCAL ====================
 class P2PServicer(groupsapp_pb2_grpc.MessageServiceServicer):
     def __init__(self, username, local_db):
         self.username = username
@@ -41,16 +36,12 @@ class P2PServicer(groupsapp_pb2_grpc.MessageServiceServicer):
         c = conn.cursor()
         msg_id = str(uuid.uuid4())
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("INSERT INTO messages VALUES (?,?,?,?,?)",
-                  (msg_id, request.group_id, request.sender, request.content, ts))
+        c.execute("INSERT INTO messages VALUES (?,?,?,?,?)", (msg_id, request.group_id, request.sender, request.content, ts))
         conn.commit()
         conn.close()
-        return groupsapp_pb2.MessageResponse(
-            message_id=msg_id,
-            message=f"✅ Recibido directo de {request.sender}",
-            timestamp=ts
-        )
-
+        print(f"\n📨 [P2P DIRECTO] {request.sender}: {request.content}", flush=True)
+        sys.stdout.flush()
+        return groupsapp_pb2.MessageResponse(message_id=msg_id, message="✅ Recibido directo", timestamp=ts)
 
 class P2PClient:
     def __init__(self):
@@ -61,7 +52,11 @@ class P2PClient:
         self.local_db = None
         self.channel = None
         self.p2p_server = None
-        self.rabbit_threads = {}          # group_id → thread
+        self.seen_messages = set()
+        self.rabbit_threads = {}
+        self.rabbit_connection = None
+        self.rabbit_channels = {}          # ← corregido (plural)
+        self.last_seen = {}                # ← para sync inteligente
 
     def init_local_db(self):
         if not self.local_db: return
@@ -74,44 +69,59 @@ class P2PClient:
     def start_local_p2p_server(self):
         self.p2p_port = 50052 + int(time.time()) % 1000
         server = grpc.server(futures.ThreadPoolExecutor(10))
-        groupsapp_pb2_grpc.add_MessageServiceServicer_to_server(
-            P2PServicer(self.username, self.local_db), server)
+        groupsapp_pb2_grpc.add_MessageServiceServicer_to_server(P2PServicer(self.username, self.local_db), server)
         server.add_insecure_port(f'[::]:{self.p2p_port}')
         server.start()
         print(f"🔌 P2P local escuchando en puerto {self.p2p_port}")
         return server
 
+    # ==================== LISTENER RABBITMQ ULTRA-OPTIMIZADO ====================
     def start_message_listener(self, group_id):
-        """CHAT EN VIVO: listener RabbitMQ en segundo plano"""
         if group_id in self.rabbit_threads:
             return
-
         queue_name = f"group_{group_id}_queue"
 
         def listener():
-            try:
-                connection, channel = get_rabbit_connection_and_channel()
-                channel.queue_declare(queue=queue_name, durable=True)
+            while True:
+                try:
+                    if self.rabbit_connection is None or self.rabbit_connection.is_closed:
+                        self.rabbit_connection, _ = get_rabbit_connection_and_channel()
+                    channel = self.rabbit_connection.channel()
+                    self.rabbit_channels[group_id] = channel
+                    channel.queue_declare(queue=queue_name, durable=True)
+                    channel.basic_qos(prefetch_count=1)
 
-                def callback(ch, method, properties, body):
-                    print(f"\n\n📨 [EN VIVO] {body.decode('utf-8')}")
+                    def callback(ch, method, properties, body):
+                        msg = body.decode('utf-8')
+                        msg_hash = hash(msg)
+                        if msg_hash in self.seen_messages: return
+                        self.seen_messages.add(msg_hash)
+                        if len(self.seen_messages) > 200:
+                            self.seen_messages.clear()
 
-                channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
-                channel.start_consuming()
-            except Exception as e:
-                print(f"❌ Listener {group_id} cerrado: {e}")
+                        if msg.startswith('📨 ') and ':' in msg:
+                            sender = msg.split(':', 1)[0].replace('📨 ', '').strip()
+                            if sender == self.username: return
+                        print(f"\n📨 [EN VIVO] {msg}", flush=True)
+                        sys.stdout.flush()
+
+                    channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=True)
+                    print(f"👂 Listener activo para {group_id}")
+                    channel.start_consuming()
+                except Exception as e:
+                    print(f"❌ Listener {group_id} reconectando... {e}")
+                    time.sleep(1.5)
+                    if self.rabbit_connection and not self.rabbit_connection.is_closed:
+                        self.rabbit_connection.close()
+                    self.rabbit_connection = None
 
         thread = threading.Thread(target=listener, daemon=True)
         thread.start()
         self.rabbit_threads[group_id] = thread
-        print(f"👂 Activado chat en vivo para grupo {group_id}")
 
     def load_groups_and_start_listeners(self, group_stub):
         try:
-            resp = group_stub.ListMyGroups(
-                groupsapp_pb2.ListMyGroupsRequest(),
-                metadata=[('token', self.token)]
-            )
+            resp = group_stub.ListMyGroups(groupsapp_pb2.ListMyGroupsRequest(), metadata=[('token', self.token)])
             self.groups = {g.group_name: g.group_id for g in resp.groups}
             for g in resp.groups:
                 self.start_message_listener(g.group_id)
@@ -119,8 +129,7 @@ class P2PClient:
             pass
 
     def send_message_p2p(self, group_id, content, discovery_stub, message_stub):
-        """Envío híbrido: P2P directo + siempre central (live + historial)"""
-        # 1. Obtener peers del grupo
+        """Envío híbrido ultra-rápido"""
         try:
             peers = discovery_stub.GetGroupOnlinePeers(
                 groupsapp_pb2.GetGroupPeersRequest(group_id=group_id),
@@ -130,20 +139,17 @@ class P2PClient:
             peers = []
 
         sent_direct = False
-        for peer in peers:
-            if peer.username == self.username: continue
-            try:
-                ch = grpc.insecure_channel(f"{peer.ip}:{peer.p2p_port}")
-                stub = groupsapp_pb2_grpc.MessageServiceStub(ch)
-                stub.SendMessage(groupsapp_pb2.SendMessageRequest(
-                    group_id=group_id, sender=self.username, content=content))
-                print(f"📤 Enviado DIRECTO a {peer.username} ✅")
-                sent_direct = True
-                ch.close()
-            except:
-                continue
+        # P2P en paralelo (máxima velocidad)
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_list = []
+            for peer in peers:
+                if peer.username == self.username: continue
+                future = executor.submit(self._send_to_peer, peer, group_id, content)
+                future_list.append(future)
+            for f in future_list:
+                if f.result(): sent_direct = True
 
-        # 2. Siempre al servidor central (garantiza DB + RabbitMQ live)
+        # Siempre al servidor central
         try:
             response = message_stub.SendMessage(
                 groupsapp_pb2.SendMessageRequest(group_id=group_id, sender=self.username, content=content),
@@ -151,27 +157,62 @@ class P2PClient:
             )
             print(response.message)
             if sent_direct:
-                print("   (+ también enviado directo a peers online)")
+                print("   (+ enviado directo a peers online)")
         except grpc.RpcError as e:
             print(f"❌ Error central: {e.details()}")
 
-    # ... (show_history y el resto del menú sin cambios)
+    def _send_to_peer(self, peer, group_id, content):
+        try:
+            ch = grpc.insecure_channel(f"{peer.ip}:{peer.p2p_port}")
+            stub = groupsapp_pb2_grpc.MessageServiceStub(ch)
+            stub.SendMessage(groupsapp_pb2.SendMessageRequest(group_id=group_id, sender=self.username, content=content))
+            ch.close()
+            return True
+        except:
+            return False
+
+    def enter_chat(self, group_id, group_name, discovery_stub, message_stub):
+        print(f"\n=== Chat: {group_name} (ID: {group_id}) ===")
+        print("Escribe mensaje o /salir")
+        print("---------------------------------------------------")
+        self.show_history(group_id)
+        self.sync_missing_messages(group_id)
+        print("---------------------------------------------------\n")
+        while True:
+            try:
+                msg = input(f"[{group_name}] > ").strip()
+            except KeyboardInterrupt:
+                break
+            if not msg or msg.lower() in ['/salir', '/exit']:
+                break
+            if msg:
+                self.send_message_p2p(group_id, msg, discovery_stub, message_stub)
+                print(f"\n📨 [YO] {self.username}: {msg}", flush=True)
+                sys.stdout.flush()
+
+    def sync_missing_messages(self, group_id):
+        try:
+            msg_stub = groupsapp_pb2_grpc.MessageServiceStub(self.channel)
+            resp = msg_stub.GetMessages(groupsapp_pb2.GetMessagesRequest(group_id=group_id), metadata=[('token', self.token)])
+            print("🔄 Sincronizando mensajes...")
+            for msg in resp.messages:
+                print(f"   {msg.message}")
+        except:
+            pass
 
     def show_history(self, group_id):
         try:
             msg_stub = groupsapp_pb2_grpc.MessageServiceStub(self.channel)
-            resp = msg_stub.GetMessages(
-                groupsapp_pb2.GetMessagesRequest(group_id=group_id),
-                metadata=[('token', self.token)]
-            )
+            resp = msg_stub.GetMessages(groupsapp_pb2.GetMessagesRequest(group_id=group_id), metadata=[('token', self.token)])
             print(f"\n📜 HISTORIAL DEL GRUPO:")
             if not resp.messages:
                 print("   (Aún no hay mensajes)")
             for msg in resp.messages:
                 print(f"   {msg.message}")
         except Exception as e:
-            print(f"❌ Error al cargar historial: {e}")
+            print(f"❌ Error historial: {e}")
 
+    # ==================== RUN (sin cambios) ====================
     def run(self):
         self.channel = grpc.insecure_channel(SIGNALING_ADDR)
         auth = groupsapp_pb2_grpc.AuthServiceStub(self.channel)
@@ -186,7 +227,7 @@ class P2PClient:
                 print("1. Registrarse     2. Iniciar sesión     3. Salir")
             else:
                 print(f"👤 {self.username} | BD: {self.local_db or 'No iniciada'}")
-                print("1. Crear grupo     2. Ver mis chats     3. Enviar mensaje")
+                print("1. Crear grupo     2. Ver mis chats     3. Abrir chat")
                 print("4. Unirme a grupo  5. Ver historial      6. Cerrar sesión")
             print("═"*70)
 
@@ -271,20 +312,28 @@ class P2PClient:
                 for i, name in enumerate(self.groups.keys(), 1):
                     print(f"   {i}. {name}")
 
-            elif choice in ['3', 'enviar mensaje', 'mensaje'] and self.token:
+            elif choice in ['3', 'abrir chat', 'chat'] and self.token:
                 if not self.groups:
-                    print("Primero ve a opción 2")
+                    print("Primero ve a opción 2 para ver tus chats.")
                     continue
-                print("Tus chats:")
-                for i, name in enumerate(self.groups.keys(), 1):
+                print("\nTus chats:")
+                group_list = list(self.groups.keys())
+                for i, name in enumerate(group_list, 1):
                     print(f"   {i}. {name}")
                 sel = input("\nElige número o nombre: ").strip()
-                group_id = self.groups.get(sel) or (list(self.groups.values())[int(sel)-1] if sel.isdigit() and int(sel) <= len(self.groups) else None)
+                try:
+                    idx = int(sel) - 1
+                    group_name = group_list[idx]
+                    group_id = self.groups[group_name]
+                except:
+                    group_id = self.groups.get(sel)
+                    group_name = sel if group_id else None
+                
                 if not group_id:
                     print("❌ Grupo no encontrado")
                     continue
-                msg = input("Mensaje: ")
-                self.send_message_p2p(group_id, msg, disc, msg_stub)
+                
+                self.enter_chat(group_id, group_name or "Grupo", disc, msg_stub)
 
             elif choice in ['4', 'unirme a grupo', 'unir'] and self.token:
                 group_id = input("Ingresa el ID del grupo: ").strip()

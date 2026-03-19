@@ -42,6 +42,7 @@ def init_database():
     cursor.execute('''CREATE TABLE IF NOT EXISTS messages 
                       (message_id TEXT, group_id TEXT, sender TEXT, content TEXT, timestamp TEXT)''')
     cursor.execute('''CREATE INDEX IF NOT EXISTS idx_messages_group_id ON messages (group_id)''')
+    cursor.execute('''CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages (timestamp)''')
     conn.commit()
     conn.close()
     logging.info("✅ Base de datos inicializada correctamente (modo WAL)")
@@ -53,20 +54,26 @@ init_database()
 # ==================== RABBITMQ (VERSIÓN SEGURA CON .env) ====================
 RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
 RABBITMQ_PASS = os.getenv('RABBITMQ_PASS', 'guest')
+rabbit_conn = None
+rabbit_channel = None
+rabbit_lock = threading.Lock()
 
-def get_rabbit_connection_and_channel():
-    """Crea conexión + canal nuevo cada vez (recomendado)"""
-    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-    parameters = pika.ConnectionParameters(
-        host='localhost',
-        credentials=credentials,
-        heartbeat=600,
-        blocked_connection_timeout=300
-    )
-    connection = pika.BlockingConnection(parameters)
-    channel = connection.channel()
-    return connection, channel
-
+def get_persistent_publisher():
+    global rabbit_conn, rabbit_channel
+    with rabbit_lock:
+        if rabbit_conn is None or rabbit_conn.is_closed:
+            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+            params = pika.ConnectionParameters(
+                host='localhost',
+                credentials=credentials,
+                heartbeat=600,
+                blocked_connection_timeout=300
+            )
+            rabbit_conn = pika.BlockingConnection(params)
+            rabbit_channel = rabbit_conn.channel()
+            logging.info("🐰 RabbitMQ publisher persistente iniciado")
+        return rabbit_channel
+    
 # ==================== INTERCEPTOR ====================
 class AuthInterceptor(grpc.ServerInterceptor):
     def intercept_service(self, continuation, handler_call_details):
@@ -219,9 +226,9 @@ class MessageServicer(groupsapp_pb2_grpc.MessageServiceServicer):
 
             # RabbitMQ
             # ==================== RABBITMQ (CORREGIDO) ====================
+            # RabbitMQ - PERSISTENTE (latencia mínima)
             try:
-                connection, channel = get_rabbit_connection_and_channel()
-                
+                channel = get_persistent_publisher()
                 queue_name = f"group_{request.group_id}_queue"
                 channel.queue_declare(queue=queue_name, durable=True)
                 
@@ -230,16 +237,12 @@ class MessageServicer(groupsapp_pb2_grpc.MessageServiceServicer):
                     exchange='',
                     routing_key=queue_name,
                     body=body.encode('utf-8'),
-                    properties=pika.BasicProperties(delivery_mode=2)  # mensaje persistente
+                    properties=pika.BasicProperties(delivery_mode=2)
                 )
-                
-                channel.close()
-                connection.close()
-                logging.info(f"📤 Mensaje enviado a cola: {queue_name}")
-                
+                logging.info(f"📤 [PERSISTENTE] Mensaje enviado a {queue_name}")
             except Exception as rmq_err:
-                logging.error(f"❌ RabbitMQ (el mensaje ya está guardado en BD): {rmq_err}")
-
+                logging.error(f"❌ RabbitMQ (mensaje ya guardado en BD): {rmq_err}")
+            
             return groupsapp_pb2.MessageResponse(message_id=message_id, message="✅ Enviado", timestamp=timestamp)
         except Exception as e:
             if 'conn' in locals(): conn.close()
@@ -304,11 +307,6 @@ class PresenceServicer(groupsapp_pb2_grpc.PresenceServiceServicer):
 
 # ==================== DISCOVERY SERVICE ====================
 peer_registry = {}
-
-class DiscoveryServicer(groupsapp_pb2_grpc.DiscoveryServiceServicer):
-    def RegisterP2P(self, request, context):
-        peer_registry[request.username] = (request.ip, request.p2p_port)
-        return groupsapp_pb2.RegisterP2PResponse(success=True, message="P2P registrado")
 
 class DiscoveryServicer(groupsapp_pb2_grpc.DiscoveryServiceServicer):
     def RegisterP2P(self, request, context):
