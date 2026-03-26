@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    ports:
+      - "5672:5672"      # AMQP (clientes)
+      - "15672:15672"    # Management UI (opcional)
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  signaling:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "50051:50051"   # gRPC
+      - "5000:5000"     # Flask REST (opcional)
+    depends_on:
+      - rabbitmq
+    environment:
+      - RABBITMQ_USER=${RABBITMQ_USER:-guest}
+      - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+      - SECRET_KEY=${SECRET_KEY:-cambia_esta_clave_secreta_muy_larga}
+    volumes:
+      - ./groupsapp.db:/app/groupsapp.db   # Persistencia de la DB general
+
+volumes:
+  rabbitmq_data:
