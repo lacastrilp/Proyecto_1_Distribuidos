@@ -12,7 +12,7 @@ services:
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
     command: >
       sh -c "
-        echo 'loopback_users = []' > /etc/rabbitmq/conf.d/loopback.conf &&
+        echo 'loopback_users = none' > /etc/rabbitmq/conf.d/loopback.conf &&
         rabbitmq-server
       "
     volumes:
@@ -32,7 +32,7 @@ services:
       - RABBITMQ_HOST=rabbitmq
       - SECRET_KEY=${SECRET_KEY:-cambia_esta_clave_secreta_muy_larga}
     volumes:
-      - ./groupsapp.db:/app/groupsapp.db   # Persistencia de la DB general
+      - ./groupsapp.db:/app/groupsapp.db
 
 volumes:
   rabbitmq_data:
