@@ -10,6 +10,11 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    command: >
+      sh -c "
+        echo 'loopback_users = []' > /etc/rabbitmq/conf.d/loopback.conf &&
+        rabbitmq-server
+      "
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
 
