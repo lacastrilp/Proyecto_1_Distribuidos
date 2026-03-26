@@ -24,6 +24,7 @@ services:
     environment:
       - RABBITMQ_USER=${RABBITMQ_USER:-guest}
       - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
+      - RABBITMQ_HOST=rabbitmq
       - SECRET_KEY=${SECRET_KEY:-cambia_esta_clave_secreta_muy_larga}
     volumes:
       - ./groupsapp.db:/app/groupsapp.db   # Persistencia de la DB general

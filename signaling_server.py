@@ -16,6 +16,10 @@ import logging
 # ==================== CONFIGURACIÓN ====================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 load_dotenv()
+# Al inicio, después de load_dotenv()
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
+RABBITMQ_PASS = os.getenv('RABBITMQ_PASS', 'guest')
 SECRET_KEY = os.getenv('SECRET_KEY', 'fallback_secret')
 
 
@@ -64,7 +68,7 @@ def get_persistent_publisher():
         if rabbit_conn is None or rabbit_conn.is_closed:
             credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
             params = pika.ConnectionParameters(
-                host='localhost',
+                host=RABBITMQ_HOST,
                 credentials=credentials,
                 heartbeat=600,
                 blocked_connection_timeout=300
