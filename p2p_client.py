@@ -19,9 +19,12 @@ SIGNALING_ADDR = 'localhost:50051'
 RABBITMQ_USER = os.getenv('RABBITMQ_USER', 'guest')
 RABBITMQ_PASS = os.getenv('RABBITMQ_PASS', 'guest')
 
+SIGNALING_ADDR = os.getenv('SIGNALING_ADDR', 'localhost:50051')
+RABBITMQ_HOST = os.getenv('RABBITMQ_HOST', 'localhost')
+
 def get_rabbit_connection_and_channel():
     credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-    parameters = pika.ConnectionParameters(host='localhost', credentials=credentials, heartbeat=600, blocked_connection_timeout=300)
+    parameters = pika.ConnectionParameters(host=RABBITMQ_HOST, credentials=credentials, heartbeat=600, blocked_connection_timeout=300)
     connection = pika.BlockingConnection(parameters)
     channel = connection.channel()
     return connection, channel
